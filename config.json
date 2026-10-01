@@ -1,0 +1,9 @@
+{
+    "app_name": "error-handling-lab",
+    "db": {
+        "host": "localhost",
+        "port": 5432,
+        "name": "users_db"
+    },
+    "log_level": "debug"
+}
