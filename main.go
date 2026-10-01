@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,7 +19,14 @@ func (e *DatabaseError) Error() string {
 	return fmt.Sprintf("database error: query %q failed: %v", e.Query, e.OriginalErr)
 }
 
-var ErrUserNotFound = errors.New("user not found")
+func (e *DatabaseError) Unwrap() error {
+	return e.OriginalErr
+}
+
+var (
+	ErrUserNotFound  = errors.New("user not found")
+	ErrInvalidUserID = errors.New("invalid user id")
+)
 
 // ---------- Simulated database ----------
 
@@ -30,7 +38,7 @@ var users = map[int]string{
 
 func FetchUser(id int) error {
 	if id <= 0 {
-		panic("invalid user id")
+		return fmt.Errorf("%w: %d", ErrInvalidUserID, id)
 	}
 
 	if _, ok := users[id]; !ok {
@@ -45,39 +53,42 @@ func FetchUser(id int) error {
 
 // ---------- Helpers ----------
 
-func parseID(raw string) int {
-	id, _ := strconv.Atoi(raw)
-	return id
+func parseID(raw string) (int, error) {
+	id, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse user id %q: %w", raw, err)
+	}
+	return id, nil
 }
 
 func loadConfig(path string) error {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("load config failed: %v", err)
+		return fmt.Errorf("read config %q: %w", path, err)
 	}
-	defer f.Close()
 
-	buf := make([]byte, 64)
-	f.Read(buf)
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("decode config %q: %w", path, err)
+	}
 	return nil
 }
 
-func writeAudit(msg string) {
-	err := os.WriteFile("audit.log", []byte(msg+"\n"), 0o644)
-	_ = err
+func writeAudit(msg string) error {
+	if err := os.WriteFile("audit.log", []byte(msg+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write audit log: %w", err)
+	}
+	return nil
 }
 
-func validateUsername(name string) {
+func validateUsername(name string) error {
 	if name == "" {
-		panic("username must not be empty")
+		return errors.New("username must not be empty")
 	}
 	if len(name) > 32 {
-		panic(fmt.Sprintf("username too long: %d", len(name)))
+		return fmt.Errorf("username too long: %d characters (maximum 32)", len(name))
 	}
-}
-
-func isNotFound(err error) bool {
-	return err != nil && err.Error() == "user not found"
+	return nil
 }
 
 // ---------- Entry point ----------
@@ -88,27 +99,44 @@ func main() {
 		rawID = os.Args[1]
 	}
 
-	id := parseID(rawID)
-	err := FetchUser(id)
+	id, err := parseID(rawID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	fetchErr := FetchUser(id)
 
 	var dbErr *DatabaseError
-	if errors.As(err, &dbErr) {
+	if errors.As(fetchErr, &dbErr) {
 		fmt.Println("failed query:", dbErr.Query)
 	}
 
-	if errors.Is(err, ErrUserNotFound) {
+	if errors.Is(fetchErr, ErrUserNotFound) {
 		fmt.Println("sentinel matched: user not found")
 	}
 
-	if isNotFound(err) {
-		fmt.Println("string match: user not found")
+	if fetchErr != nil && !errors.Is(fetchErr, ErrUserNotFound) {
+		fmt.Fprintln(os.Stderr, "error:", fmt.Errorf("fetch user %d: %w", id, fetchErr))
+		os.Exit(1)
 	}
 
 	if err := loadConfig("config.json"); err != nil {
-		fmt.Println("config problem:", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
 	}
 
-	validateUsername("")
+	if err := validateUsername("alice"); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", fmt.Errorf("validate username: %w", err))
+		os.Exit(1)
+	}
 
-	writeAudit(fmt.Sprintf("fetch user %d: %v", id, err))
+	auditMessage := fmt.Sprintf("fetch user %d: ok", id)
+	if fetchErr != nil {
+		auditMessage = fetchErr.Error()
+	}
+	if err := writeAudit(auditMessage); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 }
